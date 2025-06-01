@@ -1,41 +1,29 @@
 const express = require("express");
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 const cors = require("cors");
-const jwt = require("jsonwebtoken");
 const cookieParser = require("cookie-parser");
-const app = express();
-const port = process.env.PORT || 3000;
+const jwt = require("jsonwebtoken");
 require("dotenv").config();
 
-// Middleware
-app.use(
-  cors({
-    origin: ["http://localhost:5173"],
-    credentials: true,
-  })
+const admin = require("firebase-admin");
+const decoded = Buffer.from(process.env.FB_SERVICE_KEY, "base64").toString(
+  "utf8"
 );
+const serviceAccount = JSON.parse(decoded);
+
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+
+// Middleware
+app.use(cors());
 app.use(express.json());
 app.use(cookieParser());
 
-const logger = (req, res, next) => {
-  console.log("inside the logger middleware");
-  next();
-};
-
-const verifyToken = (req, res, next) => {
-  const token = req?.cookies?.token;
-  console.log("cookie in the middleware", token);
-  if (!token) {
-    return res.status(401).send({ message: "unauthorized access" });
-  }
-  jwt.verify(token, process.env.JWT_ACCESS_TOKEN, (err, decoded) => {
-    if (err) {
-      return res.status(401).send({ message: "unauthorized access" });
-    }
-    req.decoded = decoded;
-    next();
-  });
-};
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
 
 const uri = `mongodb+srv://${process.env.DB_USER}:${process.env.DB_PASS}@cluster0.v36kmoi.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0`;
 
@@ -48,33 +36,34 @@ const client = new MongoClient(uri, {
   },
 });
 
+const verifyFirebaseToken = async (req, res, next) => {
+  const authHeader = req?.headers?.authorization;
+
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+  const token = authHeader.split(" ")[1];
+
+  try {
+    const decoded = await admin.auth().verifyIdToken(token);
+    req.decoded = decoded;
+    console.log("token in the middleWare", decoded);
+    next();
+  } catch (error) {
+    return res.status(401).send({ message: "unauthorized access" });
+  }
+};
+
 async function run() {
   try {
     // Connect the client to the server	(optional starting in v4.7)
-    await client.connect();
+    // await client.connect();
 
     // collection
     const jobsCollection = client.db("careerCode").collection("jobs");
     const applicationsCollection = client
       .db("careerCode")
       .collection("applications");
-
-    // jwt token related api
-
-    app.post("/jwt", async (req, res) => {
-      const userData = req.body;
-      const token = jwt.sign(userData, process.env.JWT_ACCESS_TOKEN, {
-        expiresIn: "1d",
-      });
-
-      // set token in the cookie
-      res.cookie("token", token, {
-        httpOnly: true,
-        secure: false,
-      });
-
-      res.send({ success: true });
-    });
 
     // jobs api
     app.get("/jobs", async (req, res) => {
@@ -88,8 +77,11 @@ async function run() {
       res.send(result);
     });
 
-    app.get("/jobs/applications", async (req, res) => {
+    app.get("/jobs/applications", verifyFirebaseToken, async (req, res) => {
       const email = req.query.email;
+      if (email !== req.decoded.email) {
+        return res.status(403).send({ message: "forbidden access" });
+      }
       const query = { hr_email: email };
       const jobs = await jobsCollection.find(query).toArray();
 
@@ -118,10 +110,9 @@ async function run() {
 
     // applications api
 
-    app.get("/applications", logger, verifyToken, async (req, res) => {
+    app.get("/applications", verifyFirebaseToken, async (req, res) => {
       const email = req.query.email;
 
-      // console.log("inside application api", req.cookies);
       if (email !== req.decoded.email) {
         return res.status(403).send({ message: "forbidden access" });
       }
@@ -172,10 +163,10 @@ async function run() {
     });
 
     // Send a ping to confirm a successful connection
-    await client.db("admin").command({ ping: 1 });
-    console.log(
-      "Pinged your deployment. You successfully connected to MongoDB!"
-    );
+    // await client.db("admin").command({ ping: 1 });
+    // console.log(
+    //   "Pinged your deployment. You successfully connected to MongoDB!"
+    // );
   } finally {
     // // Ensures that the client will close when you finish/error
     // await client.close();
